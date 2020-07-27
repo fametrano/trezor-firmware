@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 - Print inverted question mark for non-printable characters.
+- Bump nanobp dependency to 0.4.2.  [#1105]
 
 ### Deprecated
 
@@ -253,5 +254,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 [#1074]: https://github.com/trezor/trezor-firmware/issues/1074
 [#1089]: https://github.com/trezor/trezor-firmware/issues/1089
 [#1098]: https://github.com/trezor/trezor-firmware/issues/1098
+[#1105]: https://github.com/trezor/trezor-firmware/issues/1105
 [#1115]: https://github.com/trezor/trezor-firmware/issues/1115
 [#1126]: https://github.com/trezor/trezor-firmware/issues/1126
