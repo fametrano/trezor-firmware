@@ -43,8 +43,8 @@ for BITCOIN_ONLY in 0 1; do
       ln -s /build build &&
       git checkout $TAG && \
       git submodule update --init --recursive && \
-      pipenv install && \
-      pipenv run make clean vendor build_firmware && \
+      poetry install && \
+      poetry run make clean vendor build_firmware && \
       chown -R $USER:$GROUP /build"
 
 done
@@ -69,8 +69,8 @@ for BITCOIN_ONLY in 0 1; do
       ln -s /build build &&
       git checkout $TAG && \
       git submodule update --init --recursive && \
-      pipenv install && \
-      pipenv run script/cibuild && \
+      poetry install && \
+      poetry run script/cibuild && \
       mkdir -p build/firmware && \
       cp firmware/trezor.bin build/firmware/firmware.bin && \
       cp firmware/trezor.elf build/firmware/firmware.elf && \

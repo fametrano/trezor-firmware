@@ -6,7 +6,7 @@ release core fw regular deploy:
   stage: deploy
   variables:
     DEPLOY_DIRECTORY: "releases/firmwares"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - core fw regular build
   script:
@@ -26,7 +26,7 @@ release core fw btconly deploy:
   stage: deploy
   variables:
     DEPLOY_DIRECTORY: "releases/firmwares"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - core fw btconly build
   script:
@@ -46,7 +46,7 @@ release legacy fw regular deploy:
   stage: deploy
   variables:
     DEPLOY_DIRECTORY: "releases/firmwares"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - legacy fw regular build
   script:
@@ -66,7 +66,7 @@ release legacy fw btconly deploy:
   stage: deploy
   variables:
     DEPLOY_DIRECTORY: "releases/firmwares"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - legacy fw btconly build
   script:
@@ -86,7 +86,7 @@ release core fw regular debug deploy:
   stage: deploy
   variables:
     DEPLOY_DIRECTORY: "releases/firmwares"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - core fw regular debug build
   script:
@@ -106,7 +106,7 @@ release legacy fw regular debug deploy:
   stage: deploy
   variables:
     DEPLOY_DIRECTORY: "releases/firmwares"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - legacy fw regular debug build
   script:
@@ -126,7 +126,7 @@ release legacy fw btconly debug deploy:
   stage: deploy
   variables:
     DEPLOY_DIRECTORY: "releases/firmwares"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - legacy fw btconly debug build
   script:
@@ -147,7 +147,7 @@ release legacy fw btconly debug deploy:
 
 rc core fw regular deploy:
   stage: deploy
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - core fw regular build
   script:
@@ -164,7 +164,7 @@ rc core fw regular deploy:
 
 rc core fw btconly deploy:
   stage: deploy
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - core fw btconly build
   script:
@@ -181,7 +181,7 @@ rc core fw btconly deploy:
 
 rc legacy fw regular deploy:
   stage: deploy
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - legacy fw regular build
   script:
@@ -198,7 +198,7 @@ rc legacy fw regular deploy:
 
 rc legacy fw btconly deploy:
   stage: deploy
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - legacy fw btconly build
   script:
@@ -219,7 +219,7 @@ upgrade tests core deploy:
   stage: deploy
   variables:
     DEPLOY_PATH: "${DEPLOY_BASE_DIR}/upgrade_tests"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - core unix frozen debug build
   script:
@@ -239,7 +239,7 @@ upgrade tests legacy deploy:
   stage: deploy
   variables:
     DEPLOY_PATH: "${DEPLOY_BASE_DIR}/upgrade_tests"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - legacy emu regular build
   script:
@@ -261,7 +261,7 @@ ui tests core fixtures deploy:
   stage: deploy
   variables:
     DEPLOY_PATH: "${DEPLOY_BASE_DIR}/ui_tests/"
-  before_script: []  # no pipenv
+  before_script: []  # no poetry
   dependencies:
     - core device ui test
   script:
