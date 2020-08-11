@@ -7,8 +7,6 @@ if False:
     from typing import Optional
     from ..types import ButtonStyleStateType
 
-_RADIUS = 2
-
 
 class ButtonDefault(ButtonStyle):
     class normal(ButtonStyleState):
@@ -16,21 +14,21 @@ class ButtonDefault(ButtonStyle):
         fg_color = ui.BG
         text_style = ui.BOLD
         border_color = ui.FG
-        radius = _RADIUS
+        radius = 1
 
     class active(normal):
         bg_color = ui.BG
         fg_color = ui.FG
         text_style = ui.BOLD
         border_color = ui.BG
-        radius = _RADIUS
+        radius = 1
 
     class disabled(normal):
         bg_color = ui.FG
         fg_color = ui.BG
         text_style = ui.NORMAL
         border_color = ui.FG
-        radius = _RADIUS
+        radius = 1
 
 
 class ButtonMono(ButtonDefault):
