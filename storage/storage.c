@@ -35,33 +35,29 @@
 // The APP namespace which is reserved for storage related values.
 #define APP_STORAGE 0x00
 
-// Norcow storage key of the PIN entry log and PIN success log.
+// Norcow storage keys.
+// PIN entry log and PIN success log.
 #define PIN_LOGS_KEY ((APP_STORAGE << 8) | 0x01)
 
-// Norcow storage key of the combined salt, EDEK, ESAK and PIN verification code
-// entry.
+// Combined salt, EDEK, ESAK and PIN verification code entry.
 #define EDEK_PVC_KEY ((APP_STORAGE << 8) | 0x02)
 
-// Norcow storage key of the PIN set flag.
+// PIN set flag.
 #define PIN_NOT_SET_KEY ((APP_STORAGE << 8) | 0x03)
 
-// Norcow storage key of the storage version.
+// Storage version.
 #define VERSION_KEY ((APP_STORAGE << 8) | 0x04)
 
-// Norcow storage key of the storage authentication tag.
+// Storage authentication tag.
 #define STORAGE_TAG_KEY ((APP_STORAGE << 8) | 0x05)
 
-// Norcow storage key of the wipe code data.
+// Wipe code data.
 #define WIPE_CODE_DATA_KEY ((APP_STORAGE << 8) | 0x06)
 
-// Norcow storage key of the storage upgrade flag.
-#define STORAGE_UPGRADED_KEY ((APP_STORAGE << 8) | 0x07)
-
-// The PIN value corresponding to an invalid PIN.
-#define PIN_INVALID 0
-
-// The PIN value corresponding to an empty PIN.
-#define PIN_EMPTY 1
+// Storage upgrade flag and version.
+// The first word indicates whether the storage was upgraded before unlock, if
+// it was, then a second word follows giving the old storage version.
+#define STORAGE_UPGRADE_KEY ((APP_STORAGE << 8) | 0x07)
 
 // Maximum number of failed unlock attempts.
 // NOTE: The PIN counter logic relies on this constant being less than or equal
@@ -70,6 +66,9 @@
 
 // The total number of iterations to use in PBKDF2.
 #define PIN_ITER_COUNT 20000
+
+// Maximum number of PIN digits allowed prior to storage version 3.
+#define V2_MAX_PIN_LEN 9
 
 // The number of seconds required to derive the KEK and KEIV.
 #define DERIVE_SECS 1
@@ -114,23 +113,18 @@
 // The length of the ChaCha20 block in bytes.
 #define CHACHA20_BLOCK_SIZE 64
 
-// The length of the wipe code in bytes.
-#define WIPE_CODE_SIZE (sizeof(uint32_t))
-
 // The byte length of the salt used in checking the wipe code.
 #define WIPE_CODE_SALT_SIZE 8
 
 // The byte length of the tag used in checking the wipe code.
 #define WIPE_CODE_TAG_SIZE 8
 
-// The total length of the WIPE_CODE_DATA_KEY entry.
-#define WIPE_CODE_DATA_SIZE \
-  (WIPE_CODE_SIZE + WIPE_CODE_SALT_SIZE + WIPE_CODE_TAG_SIZE)
-
 // The value corresponding to an unconfigured wipe code.
-// NOTE: This is intentionally different from PIN_EMPTY so that we don't need
-// special handling when both the PIN and wipe code are not set.
-#define WIPE_CODE_EMPTY 0
+// NOTE: This is intentionally different from an empty PIN so that we don't need
+// special handling when both the PIN and wipe code are not set. This value is
+// the same as the one used in version 2 storage, which simplifies storage
+// upgrade from versions 0 and 1.
+static const uint8_t WIPE_CODE_EMPTY[] = {0, 0, 0, 0};
 
 // The length of the counter tail in words.
 #define COUNTER_TAIL_WORDS 2
@@ -164,7 +158,10 @@ static void __handle_fault(const char *msg, const char *file, int line,
                            const char *func);
 #define handle_fault(msg) (__handle_fault(msg, __FILE__, __LINE__, __func__))
 
+static uint32_t pin_to_int(const uint8_t *pin, size_t pin_len);
 static secbool storage_upgrade(void);
+static secbool storage_upgrade_unlocked(const uint8_t *pin, size_t pin_len,
+                                        const uint8_t *ext_salt);
 static secbool storage_set_encrypted(const uint16_t key, const void *val,
                                      const uint16_t len);
 static secbool storage_get_encrypted(const uint16_t key, void *val_dest,
@@ -359,29 +356,48 @@ static secbool auth_get(uint16_t key, const void **val, uint16_t *len) {
   return sectrue;
 }
 
-static secbool set_wipe_code(uint32_t wipe_code) {
-  if (wipe_code == PIN_EMPTY) {
-    // This is to avoid having to check pin != PIN_EMPTY when checking the wipe
+static secbool set_wipe_code(const uint8_t *wipe_code, size_t wipe_code_len) {
+  if (wipe_code_len == 0) {
+    // This is to avoid having to check pin != "" when checking the wipe
     // code.
     wipe_code = WIPE_CODE_EMPTY;
+    wipe_code_len = sizeof(WIPE_CODE_EMPTY);
   }
 
   // The format of the WIPE_CODE_DATA_KEY entry is:
-  // wipe code (4 bytes), random salt (16 bytes), authentication tag (16 bytes)
-  // NOTE: We allocate extra space for the HMAC computation.
-  uint8_t wipe_code_data[WIPE_CODE_SIZE + WIPE_CODE_SALT_SIZE +
-                         SHA256_DIGEST_LENGTH] = {0};
-  uint8_t *salt = wipe_code_data + WIPE_CODE_SIZE;
-  uint8_t *tag = wipe_code_data + WIPE_CODE_SIZE + WIPE_CODE_SALT_SIZE;
-  memcpy(wipe_code_data, &wipe_code, sizeof(wipe_code));
-  memzero(&wipe_code, sizeof(wipe_code));
+  // wipe code (variable), random salt (16 bytes), authentication tag (16 bytes)
+  // NOTE: We allocate extra space for the HMAC result.
+  uint8_t salt_and_tag[WIPE_CODE_SALT_SIZE + SHA256_DIGEST_LENGTH] = {0};
+  uint8_t *salt = salt_and_tag;
+  uint8_t *tag = salt_and_tag + WIPE_CODE_SALT_SIZE;
+
   random_buffer(salt, WIPE_CODE_SALT_SIZE);
-  hmac_sha256(salt, WIPE_CODE_SALT_SIZE, wipe_code_data, WIPE_CODE_SIZE, tag);
-  return norcow_set(WIPE_CODE_DATA_KEY, wipe_code_data, WIPE_CODE_DATA_SIZE);
+  hmac_sha256(salt, WIPE_CODE_SALT_SIZE, wipe_code, wipe_code_len, tag);
+
+  // Preallocate the entry in the flash storage.
+  if (sectrue !=
+      norcow_set(WIPE_CODE_DATA_KEY, NULL,
+                 wipe_code_len + WIPE_CODE_SALT_SIZE + WIPE_CODE_TAG_SIZE)) {
+    return secfalse;
+  }
+
+  // Write wipe code into the preallocated entry.
+  if (sectrue !=
+      norcow_update_bytes(WIPE_CODE_DATA_KEY, 0, wipe_code, wipe_code_len)) {
+    return secfalse;
+  }
+
+  // Write salt and tag into the preallocated entry.
+  if (sectrue !=
+      norcow_update_bytes(WIPE_CODE_DATA_KEY, wipe_code_len, salt_and_tag,
+                          WIPE_CODE_SALT_SIZE + WIPE_CODE_TAG_SIZE)) {
+    return secfalse;
+  }
+
+  return sectrue;
 }
 
-static secbool is_not_wipe_code(uint32_t pin) {
-  uint8_t wipe_code[WIPE_CODE_SIZE] = {0};
+static secbool is_not_wipe_code(const uint8_t *pin, size_t pin_len) {
   uint8_t salt[WIPE_CODE_SALT_SIZE] = {0};
   uint8_t stored_tag[WIPE_CODE_TAG_SIZE] = {0};
   uint8_t computed_tag1[SHA256_DIGEST_LENGTH] = {0};
@@ -391,20 +407,20 @@ static secbool is_not_wipe_code(uint32_t pin) {
   const void *wipe_code_data = NULL;
   uint16_t len = 0;
   if (sectrue != norcow_get(WIPE_CODE_DATA_KEY, &wipe_code_data, &len) ||
-      len != WIPE_CODE_DATA_SIZE) {
+      len < WIPE_CODE_SALT_SIZE + WIPE_CODE_TAG_SIZE) {
     handle_fault("no wipe code");
     return secfalse;
   }
-  memcpy(wipe_code, wipe_code_data, sizeof(wipe_code));
-  memcpy(salt, (uint8_t *)wipe_code_data + WIPE_CODE_SIZE, sizeof(salt));
+  const uint8_t *wipe_code = (const uint8_t *)wipe_code_data;
+  size_t wipe_code_len = len - WIPE_CODE_SALT_SIZE - WIPE_CODE_TAG_SIZE;
+  memcpy(salt, (uint8_t *)wipe_code_data + wipe_code_len, sizeof(salt));
   memcpy(stored_tag,
-         (uint8_t *)wipe_code_data + WIPE_CODE_SIZE + WIPE_CODE_SALT_SIZE,
+         (uint8_t *)wipe_code_data + wipe_code_len + WIPE_CODE_SALT_SIZE,
          sizeof(stored_tag));
 
   // Check integrity in case of flash read manipulation attack.
-  hmac_sha256(salt, WIPE_CODE_SALT_SIZE, wipe_code, sizeof(wipe_code),
+  hmac_sha256(salt, WIPE_CODE_SALT_SIZE, wipe_code, wipe_code_len,
               computed_tag1);
-  memzero(wipe_code, sizeof(wipe_code));
   if (sectrue != secequal(stored_tag, computed_tag1, sizeof(stored_tag))) {
     handle_fault("wipe code tag");
     return secfalse;
@@ -412,20 +428,17 @@ static secbool is_not_wipe_code(uint32_t pin) {
 
   // Prepare the authentication tag of the entered PIN.
   wait_random();
-  hmac_sha256(salt, WIPE_CODE_SALT_SIZE, (const uint8_t *)&pin, WIPE_CODE_SIZE,
-              computed_tag1);
+  hmac_sha256(salt, WIPE_CODE_SALT_SIZE, pin, pin_len, computed_tag1);
 
   // Recompute to check for fault injection attack.
   wait_random();
-  hmac_sha256(salt, WIPE_CODE_SALT_SIZE, (const uint8_t *)&pin, WIPE_CODE_SIZE,
-              computed_tag2);
+  hmac_sha256(salt, WIPE_CODE_SALT_SIZE, pin, pin_len, computed_tag2);
   memzero(salt, sizeof(salt));
   if (sectrue !=
       secequal(computed_tag1, computed_tag2, sizeof(computed_tag1))) {
     handle_fault("wipe code fault");
     return secfalse;
   }
-  memzero(&pin, sizeof(pin));
 
   // Compare wipe code with the entered PIN via the authentication tag.
   wait_random();
@@ -436,8 +449,8 @@ static secbool is_not_wipe_code(uint32_t pin) {
   return sectrue;
 }
 
-static void derive_kek(uint32_t pin, const uint8_t *random_salt,
-                       const uint8_t *ext_salt,
+static void derive_kek(const uint8_t *pin, size_t pin_len,
+                       const uint8_t *random_salt, const uint8_t *ext_salt,
                        uint8_t kek[SHA256_DIGEST_LENGTH],
                        uint8_t keiv[SHA256_DIGEST_LENGTH]) {
 #if BYTE_ORDER == BIG_ENDIAN
@@ -465,8 +478,7 @@ static void derive_kek(uint32_t pin, const uint8_t *random_salt,
   }
 
   PBKDF2_HMAC_SHA256_CTX ctx = {0};
-  pbkdf2_hmac_sha256_Init(&ctx, (const uint8_t *)&pin, sizeof(pin), salt,
-                          salt_len, 1);
+  pbkdf2_hmac_sha256_Init(&ctx, pin, pin_len, salt, salt_len, 1);
   for (int i = 1; i <= 5; i++) {
     pbkdf2_hmac_sha256_Update(&ctx, PIN_ITER_COUNT / 10);
     if (ui_callback && ui_message) {
@@ -477,8 +489,7 @@ static void derive_kek(uint32_t pin, const uint8_t *random_salt,
   }
   pbkdf2_hmac_sha256_Final(&ctx, kek);
 
-  pbkdf2_hmac_sha256_Init(&ctx, (const uint8_t *)&pin, sizeof(pin), salt,
-                          salt_len, 2);
+  pbkdf2_hmac_sha256_Init(&ctx, pin, pin_len, salt, salt_len, 2);
   for (int i = 6; i <= 10; i++) {
     pbkdf2_hmac_sha256_Update(&ctx, PIN_ITER_COUNT / 10);
     if (ui_callback && ui_message) {
@@ -491,14 +502,13 @@ static void derive_kek(uint32_t pin, const uint8_t *random_salt,
 
   ui_rem -= DERIVE_SECS;
   memzero(&ctx, sizeof(PBKDF2_HMAC_SHA256_CTX));
-  memzero(&pin, sizeof(pin));
   memzero(&salt, sizeof(salt));
 }
 
-static secbool set_pin(uint32_t pin, const uint8_t *ext_salt) {
+static secbool set_pin(const uint8_t *pin, size_t pin_len,
+                       const uint8_t *ext_salt) {
   // Fail if the PIN is the same as the wipe code. Ignore during upgrade.
-  if (norcow_active_version != 0 && sectrue != is_not_wipe_code(pin)) {
-    memzero(&pin, sizeof(pin));
+  if (norcow_active_version != 0 && sectrue != is_not_wipe_code(pin, pin_len)) {
     return secfalse;
   }
 
@@ -512,7 +522,7 @@ static secbool set_pin(uint32_t pin, const uint8_t *ext_salt) {
   uint8_t keiv[SHA256_DIGEST_LENGTH] = {0};
   chacha20poly1305_ctx ctx = {0};
   random_buffer(rand_salt, RANDOM_SALT_SIZE);
-  derive_kek(pin, rand_salt, ext_salt, kek, keiv);
+  derive_kek(pin, pin_len, rand_salt, ext_salt, kek, keiv);
   rfc7539_init(&ctx, kek, keiv);
   memzero(kek, sizeof(kek));
   memzero(keiv, sizeof(keiv));
@@ -524,14 +534,13 @@ static secbool set_pin(uint32_t pin, const uint8_t *ext_salt) {
   memzero(buffer, sizeof(buffer));
 
   if (ret == sectrue) {
-    if (pin == PIN_EMPTY) {
+    if (pin_len == 0) {
       ret = norcow_set(PIN_NOT_SET_KEY, &TRUE_BYTE, sizeof(TRUE_BYTE));
     } else {
       ret = norcow_set(PIN_NOT_SET_KEY, &FALSE_BYTE, sizeof(FALSE_BYTE));
     }
   }
 
-  memzero(&pin, sizeof(pin));
   return ret;
 }
 
@@ -637,15 +646,15 @@ static void init_wiped_storage(void) {
   ensure(auth_init(), "set_storage_auth_tag failed");
   ensure(storage_set_encrypted(VERSION_KEY, &version, sizeof(version)),
          "set_storage_version failed");
-  ensure(norcow_set(STORAGE_UPGRADED_KEY, &FALSE_WORD, sizeof(FALSE_WORD)),
+  ensure(norcow_set(STORAGE_UPGRADE_KEY, &FALSE_WORD, sizeof(FALSE_WORD)),
          "set_storage_not_upgraded failed");
   ensure(pin_logs_init(0), "init_pin_logs failed");
-  ensure(set_wipe_code(WIPE_CODE_EMPTY), "set_wipe_code failed");
+  ensure(set_wipe_code((const uint8_t *)"", 0), "set_wipe_code failed");
 
   ui_total = DERIVE_SECS;
   ui_rem = ui_total;
   ui_message = PROCESSING_MSG;
-  ensure(set_pin(PIN_EMPTY, NULL), "init_pin failed");
+  ensure(set_pin((const uint8_t *)"", 0, NULL), "init_pin failed");
 }
 
 void storage_init(PIN_UI_WAIT_CALLBACK callback, const uint8_t *salt,
@@ -870,9 +879,10 @@ secbool check_storage_version(void) {
     handle_fault("storage version check");
     return secfalse;
   }
-  const void *storage_upgraded = NULL;
-  if (sectrue != norcow_get(STORAGE_UPGRADED_KEY, &storage_upgraded, &len) ||
-      len != sizeof(TRUE_WORD)) {
+  const void *storage_upgrade_version = NULL;
+  if (sectrue !=
+          norcow_get(STORAGE_UPGRADE_KEY, &storage_upgrade_version, &len) ||
+      len < sizeof(TRUE_WORD)) {
     handle_fault("storage version check");
     return secfalse;
   }
@@ -883,18 +893,18 @@ secbool check_storage_version(void) {
     return secfalse;
   } else if (version < norcow_active_version) {
     // Storage was upgraded.
-    if (*(const uint32_t *)storage_upgraded != TRUE_WORD) {
+    if (*(const uint32_t *)storage_upgrade_version != TRUE_WORD) {
       // Attack: The upgrade process was bypassed.
       storage_wipe();
       handle_fault("storage version check");
       return secfalse;
     }
-    norcow_set(STORAGE_UPGRADED_KEY, &FALSE_WORD, sizeof(FALSE_WORD));
+    norcow_set(STORAGE_UPGRADE_KEY, &FALSE_WORD, sizeof(FALSE_WORD));
     storage_set_encrypted(VERSION_KEY, &norcow_active_version,
                           sizeof(norcow_active_version));
   } else {
     // Standard operation. The storage was neither upgraded nor downgraded.
-    if (*(const uint32_t *)storage_upgraded != FALSE_WORD) {
+    if (*(const uint32_t *)storage_upgrade_version != FALSE_WORD) {
       // Attack: The upgrade process was launched when it shouldn't have been.
       storage_wipe();
       handle_fault("storage version check");
@@ -939,23 +949,55 @@ static secbool decrypt_dek(const uint8_t *kek, const uint8_t *keiv) {
   memcpy(cached_keys, keys, sizeof(keys));
   memzero(keys, sizeof(keys));
   memzero(tag, sizeof(tag));
-  // Check that the authenticated version number matches the norcow version.
-  // NOTE: This also initializes the authentication_sum by calling
-  // storage_get_encrypted() which calls auth_get().
-  return check_storage_version();
+  return sectrue;
 }
 
-static secbool unlock(uint32_t pin, const uint8_t *ext_salt) {
-  if (sectrue != initialized || pin == PIN_INVALID) {
-    return secfalse;
+// If a storage upgrade is in progress return the (unauthenticated) version we
+// are upgrading from, otherwise return current version.
+static uint32_t get_upgrade_version(void) {
+  const void *val = NULL;
+  uint16_t len = 0;
+  if (sectrue == norcow_get(STORAGE_UPGRADE_KEY, &val, &len) &&
+      len == sizeof(TRUE_WORD) + sizeof(uint32_t)) {
+    return ((uint32_t *)val)[1];
   }
 
-  storage_ensure_not_wipe_code(pin);
+  // No upgrade in progress return current version.
+  return NORCOW_VERSION;
+}
+
+static void ensure_not_wipe_code(const uint8_t *pin, size_t pin_len) {
+  if (sectrue != is_not_wipe_code(pin, pin_len)) {
+    storage_wipe();
+    error_shutdown("You have entered the", "wipe code. All private",
+                   "data has been erased.", NULL);
+  }
+}
+
+static secbool unlock(const uint8_t *pin, size_t pin_len,
+                      const uint8_t *ext_salt) {
+  const uint8_t *unlock_pin = pin;
+  size_t unlock_pin_len = pin_len;
+
+  // In case of an upgrade from version 1 or 2, encode the PIN to the old format
+  // and bump the total time of UI progress to account for the set_pin() call in
+  // storage_upgrade_unlocked().
+  uint32_t legacy_pin = 0;
+  if (get_upgrade_version() <= 2) {
+    ui_total += DERIVE_SECS;
+    ui_rem += DERIVE_SECS;
+    legacy_pin = pin_to_int(pin, pin_len);
+    unlock_pin = (const uint8_t *)&legacy_pin;
+    unlock_pin_len = sizeof(legacy_pin);
+  }
+
+  // Now we can check for wipe code.
+  ensure_not_wipe_code(unlock_pin, unlock_pin_len);
 
   // Get the pin failure counter
   uint32_t ctr = 0;
   if (sectrue != pin_get_fails(&ctr)) {
-    memzero(&pin, sizeof(pin));
+    memzero(&legacy_pin, sizeof(legacy_pin));
     return secfalse;
   }
 
@@ -981,6 +1023,7 @@ static secbool unlock(uint32_t pin, const uint8_t *ext_salt) {
           progress = ((ui_total - ui_rem) * 10 + i) * 100 / ui_total;
         }
         if (sectrue == ui_callback(ui_rem, progress, ui_message)) {
+          memzero(&legacy_pin, sizeof(legacy_pin));
           return secfalse;
         }
       }
@@ -995,14 +1038,14 @@ static secbool unlock(uint32_t pin, const uint8_t *ext_salt) {
   if (sectrue != initialized ||
       sectrue != norcow_get(EDEK_PVC_KEY, &rand_salt, &len) ||
       len != RANDOM_SALT_SIZE + KEYS_SIZE + PVC_SIZE) {
-    memzero(&pin, sizeof(pin));
     handle_fault("no EDEK");
     return secfalse;
   }
   uint8_t kek[SHA256_DIGEST_LENGTH] = {0};
   uint8_t keiv[SHA256_DIGEST_LENGTH] = {0};
-  derive_kek(pin, (const uint8_t *)rand_salt, ext_salt, kek, keiv);
-  memzero(&pin, sizeof(pin));
+  derive_kek(unlock_pin, unlock_pin_len, (const uint8_t *)rand_salt, ext_salt,
+             kek, keiv);
+  memzero(&legacy_pin, sizeof(legacy_pin));
 
   // First, we increase PIN fail counter in storage, even before checking the
   // PIN.  If the PIN is correct, we reset the counter afterwards.  If not, we
@@ -1032,16 +1075,30 @@ static secbool unlock(uint32_t pin, const uint8_t *ext_salt) {
   memzero(kek, sizeof(kek));
   memzero(keiv, sizeof(keiv));
 
+  // Check for storage upgrades that need to be performed after unlocking and
+  // check that the authenticated version number matches the norcow version.
+  // NOTE: This also initializes the authentication_sum by calling
+  // storage_get_encrypted() which calls auth_get().
+  if (sectrue != storage_upgrade_unlocked(pin, pin_len, ext_salt) ||
+      sectrue != check_storage_version()) {
+    return secfalse;
+  }
+
   unlocked = sectrue;
 
   // Finally set the counter to 0 to indicate success.
   return pin_fails_reset();
 }
 
-secbool storage_unlock(uint32_t pin, const uint8_t *ext_salt) {
+secbool storage_unlock(const uint8_t *pin, size_t pin_len,
+                       const uint8_t *ext_salt) {
+  if (sectrue != initialized || pin == NULL) {
+    return secfalse;
+  }
+
   ui_total = DERIVE_SECS;
   ui_rem = ui_total;
-  if (pin == PIN_EMPTY) {
+  if (pin_len == 0) {
     if (ui_message == NULL) {
       ui_message = STARTING_MSG;
     } else {
@@ -1050,7 +1107,7 @@ secbool storage_unlock(uint32_t pin, const uint8_t *ext_salt) {
   } else {
     ui_message = VERIFYING_PIN_MSG;
   }
-  return unlock(pin, ext_salt);
+  return unlock(pin, pin_len, ext_salt);
 }
 
 /*
@@ -1317,34 +1374,37 @@ uint32_t storage_get_pin_rem(void) {
   return PIN_MAX_TRIES - ctr;
 }
 
-secbool storage_change_pin(uint32_t oldpin, uint32_t newpin,
+secbool storage_change_pin(const uint8_t *oldpin, size_t oldpin_len,
+                           const uint8_t *newpin, size_t newpin_len,
                            const uint8_t *old_ext_salt,
                            const uint8_t *new_ext_salt) {
-  if (sectrue != initialized || oldpin == PIN_INVALID ||
-      newpin == PIN_INVALID) {
+  if (sectrue != initialized || oldpin == NULL || newpin == NULL) {
     return secfalse;
   }
 
   ui_total = 2 * DERIVE_SECS;
   ui_rem = ui_total;
-  ui_message = (oldpin != PIN_EMPTY && newpin == PIN_EMPTY) ? VERIFYING_PIN_MSG
-                                                            : PROCESSING_MSG;
+  ui_message =
+      (oldpin_len != 0 && newpin_len == 0) ? VERIFYING_PIN_MSG : PROCESSING_MSG;
 
-  if (sectrue != unlock(oldpin, old_ext_salt)) {
+  if (sectrue != unlock(oldpin, oldpin_len, old_ext_salt)) {
     return secfalse;
   }
-  secbool ret = set_pin(newpin, new_ext_salt);
-  memzero(&oldpin, sizeof(oldpin));
-  memzero(&newpin, sizeof(newpin));
+  secbool ret = set_pin(newpin, newpin_len, new_ext_salt);
   return ret;
 }
 
-void storage_ensure_not_wipe_code(uint32_t pin) {
-  if (sectrue != is_not_wipe_code(pin)) {
-    storage_wipe();
-    error_shutdown("You have entered the", "wipe code. All private",
-                   "data has been erased.", NULL);
+void storage_ensure_not_wipe_code(const uint8_t *pin, size_t pin_len) {
+  // In case of upgrade from version 2 or lower, encode PIN to old format.
+  uint32_t legacy_pin = 0;
+  if (get_upgrade_version() <= 2) {
+    legacy_pin = pin_to_int(pin, pin_len);
+    pin = (const uint8_t *)&legacy_pin;
+    pin_len = sizeof(legacy_pin);
   }
+
+  ensure_not_wipe_code(pin, pin_len);
+  memzero(&legacy_pin, sizeof(legacy_pin));
 }
 
 secbool storage_has_wipe_code(void) {
@@ -1352,29 +1412,28 @@ secbool storage_has_wipe_code(void) {
     return secfalse;
   }
 
-  return is_not_wipe_code(WIPE_CODE_EMPTY);
+  return is_not_wipe_code(WIPE_CODE_EMPTY, sizeof(WIPE_CODE_EMPTY));
 }
 
-secbool storage_change_wipe_code(uint32_t pin, const uint8_t *ext_salt,
-                                 uint32_t wipe_code) {
-  if (sectrue != initialized || (pin != PIN_EMPTY && pin == wipe_code) ||
-      pin == PIN_INVALID || wipe_code == PIN_INVALID) {
-    memzero(&pin, sizeof(pin));
-    memzero(&wipe_code, sizeof(wipe_code));
+secbool storage_change_wipe_code(const uint8_t *pin, size_t pin_len,
+                                 const uint8_t *ext_salt,
+                                 const uint8_t *wipe_code,
+                                 size_t wipe_code_len) {
+  if (sectrue != initialized || pin == NULL || wipe_code == NULL ||
+      (pin_len != 0 && pin_len == wipe_code_len &&
+       memcmp(pin, wipe_code, pin_len) == 0)) {
     return secfalse;
   }
 
   ui_total = DERIVE_SECS;
   ui_rem = ui_total;
-  ui_message = (pin != PIN_EMPTY && wipe_code == PIN_EMPTY) ? VERIFYING_PIN_MSG
-                                                            : PROCESSING_MSG;
+  ui_message =
+      (pin_len != 0 && wipe_code_len == 0) ? VERIFYING_PIN_MSG : PROCESSING_MSG;
 
   secbool ret = secfalse;
-  if (sectrue == unlock(pin, ext_salt)) {
-    ret = set_wipe_code(wipe_code);
+  if (sectrue == unlock(pin, pin_len, ext_salt)) {
+    ret = set_wipe_code(wipe_code, wipe_code_len);
   }
-  memzero(&pin, sizeof(pin));
-  memzero(&wipe_code, sizeof(wipe_code));
   return ret;
 }
 
@@ -1450,9 +1509,44 @@ static secbool v0_pin_get_fails(uint32_t *ctr) {
   return sectrue;
 }
 
+// Legacy conversion of PIN to uint32_t used until storage version 3.
+static uint32_t pin_to_int(const uint8_t *pin, size_t pin_len) {
+  if (pin_len > V2_MAX_PIN_LEN) {
+    return 0;
+  }
+
+  uint32_t val = 1;
+  size_t i = 0;
+  for (i = 0; i < pin_len; ++i) {
+    if (pin[i] < '0' || pin[i] > '9') {
+      return 0;
+    }
+    val = 10 * val + pin[i] - '0';
+  }
+
+  return val;
+}
+
+// Legacy conversion of PIN from uint32_t used until storage version 3.
+static char *int_to_pin(uint32_t val) {
+  static char pin[V2_MAX_PIN_LEN + 1] = {0};
+  size_t pos = sizeof(pin) - 1;
+  pin[pos] = '\0';
+  while (val != 1) {
+    if (pos == 0) {
+      return NULL;
+    }
+    pos--;
+    pin[pos] = '0' + (val % 10);
+    val /= 10;
+  }
+  return &pin[pos];
+}
+
 static secbool storage_upgrade(void) {
   const uint16_t V0_PIN_KEY = 0x0000;
   const uint16_t V0_PIN_FAIL_KEY = 0x0001;
+  const uint32_t V2_EMPTY_PIN = 1;
   uint16_t key = 0;
   uint16_t len = 0;
   const void *val = NULL;
@@ -1464,10 +1558,9 @@ static secbool storage_upgrade(void) {
     // Initialize the storage authentication tag.
     auth_init();
 
-    // Set the new storage version number.
-    uint32_t version = 1;
-    if (sectrue !=
-        storage_set_encrypted(VERSION_KEY, &version, sizeof(version))) {
+    // Set the storage version number.
+    if (sectrue != storage_set_encrypted(VERSION_KEY, &norcow_active_version,
+                                         sizeof(norcow_active_version))) {
       return secfalse;
     }
 
@@ -1475,10 +1568,12 @@ static secbool storage_upgrade(void) {
     ui_total = DERIVE_SECS;
     ui_rem = ui_total;
     ui_message = PROCESSING_MSG;
-    if (sectrue == norcow_get(V0_PIN_KEY, &val, &len)) {
-      set_pin(*(const uint32_t *)val, NULL);
+    secbool found = norcow_get(V0_PIN_KEY, &val, &len);
+    if (sectrue == found && *(const uint32_t *)val != V2_EMPTY_PIN) {
+      set_pin((const uint8_t *)val, len, NULL);
     } else {
-      set_pin(PIN_EMPTY, NULL);
+      set_pin((const uint8_t *)&V2_EMPTY_PIN, sizeof(V2_EMPTY_PIN), NULL);
+      ret = norcow_set(PIN_NOT_SET_KEY, &TRUE_BYTE, sizeof(TRUE_BYTE));
     }
 
     // Convert PIN failure counter.
@@ -1516,17 +1611,64 @@ static secbool storage_upgrade(void) {
     }
   }
 
+  // Wipe code.
   if (norcow_active_version <= 1) {
-    if (sectrue != set_wipe_code(WIPE_CODE_EMPTY)) {
+    if (sectrue != set_wipe_code((const uint8_t *)"", 0)) {
       return secfalse;
     }
   }
 
-  if (sectrue !=
-      norcow_set(STORAGE_UPGRADED_KEY, &TRUE_WORD, sizeof(TRUE_WORD))) {
-    return secfalse;
+  if (sectrue != norcow_get(STORAGE_UPGRADE_KEY, &val, &len) ||
+      len != sizeof(TRUE_WORD) + sizeof(uint32_t)) {
+    uint32_t storage_upgrade_version[2] = {TRUE_WORD, norcow_active_version};
+    if (sectrue != norcow_set(STORAGE_UPGRADE_KEY, storage_upgrade_version,
+                              sizeof(storage_upgrade_version))) {
+      return secfalse;
+    }
   }
 
   norcow_active_version = NORCOW_VERSION;
   return norcow_upgrade_finish();
+}
+
+static secbool storage_upgrade_unlocked(const uint8_t *pin, size_t pin_len,
+                                        const uint8_t *ext_salt) {
+  uint32_t version = 0;
+  uint16_t len = 0;
+  if (sectrue !=
+          storage_get_encrypted(VERSION_KEY, &version, sizeof(version), &len) ||
+      len != sizeof(version)) {
+    handle_fault("storage version check");
+    return secfalse;
+  }
+
+  secbool ret = sectrue;
+  if (version <= 2) {
+    if (sectrue != set_pin(pin, pin_len, ext_salt)) {
+      return secfalse;
+    }
+  }
+
+  if (version == 2) {
+    const void *wipe_code_data = NULL;
+    if (sectrue != norcow_get(WIPE_CODE_DATA_KEY, &wipe_code_data, &len) ||
+        len < sizeof(uint32_t)) {
+      handle_fault("no wipe code");
+      return secfalse;
+    }
+
+    if (*(uint32_t *)wipe_code_data != 0) {
+      char *wipe_code = int_to_pin(*(uint32_t *)wipe_code_data);
+      if (wipe_code == NULL) {
+        handle_fault("invalid wipe code");
+        return secfalse;
+      }
+
+      size_t wipe_code_len = strnlen(wipe_code, V2_MAX_PIN_LEN);
+      ret = set_wipe_code((const uint8_t *)wipe_code, wipe_code_len);
+      memzero(wipe_code, wipe_code_len);
+    }
+  }
+
+  return ret;
 }
