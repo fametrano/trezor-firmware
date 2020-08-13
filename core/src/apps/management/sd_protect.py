@@ -4,7 +4,6 @@ from trezor import config, ui, wire
 from trezor.crypto import random
 from trezor.messages import SdProtectOperationType
 from trezor.messages.Success import Success
-from trezor.pin import pin_to_int
 from trezor.ui.text import Text
 
 from apps.common.confirm import require_confirm
@@ -66,9 +65,9 @@ async def sd_protect_enable(ctx: wire.Context, msg: SdProtect) -> Success:
 
     # Get the current PIN.
     if config.has_pin():
-        pin = pin_to_int(await request_pin(ctx, "Enter PIN", config.get_pin_rem()))
+        pin = await request_pin(ctx, "Enter PIN", config.get_pin_rem())
     else:
-        pin = pin_to_int("")
+        pin = ""
 
     # Check PIN and prepare salt file.
     salt, salt_auth_key, salt_tag = _make_salt()
@@ -105,7 +104,7 @@ async def sd_protect_disable(ctx: wire.Context, msg: SdProtect) -> Success:
     pin, salt = await request_pin_and_sd_salt(ctx, "Enter PIN")
 
     # Check PIN and remove salt.
-    if not config.change_pin(pin_to_int(pin), pin_to_int(pin), salt, None):
+    if not config.change_pin(pin, pin, salt, None):
         await error_pin_invalid(ctx)
 
     storage.device.set_sd_salt_auth_key(None)
@@ -140,7 +139,7 @@ async def sd_protect_refresh(ctx: wire.Context, msg: SdProtect) -> Success:
     new_salt, new_auth_key, new_salt_tag = _make_salt()
     await _set_salt(ctx, new_salt, new_salt_tag, stage=True)
 
-    if not config.change_pin(pin_to_int(pin), pin_to_int(pin), old_salt, new_salt):
+    if not config.change_pin(pin, pin, old_salt, new_salt):
         await error_pin_invalid(ctx)
 
     storage.device.set_sd_salt_auth_key(new_auth_key)

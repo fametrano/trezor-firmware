@@ -4,7 +4,6 @@ from trezor import config, wire
 from trezor.crypto import bip39, slip39
 from trezor.messages import BackupType
 from trezor.messages.Success import Success
-from trezor.pin import pin_to_int
 from trezor.ui.text import Text
 
 from apps.common.confirm import require_confirm
@@ -47,7 +46,7 @@ async def load_device(ctx, msg):
     storage.device.set_passphrase_enabled(msg.passphrase_protection)
     storage.device.set_label(msg.label or "")
     if msg.pin:
-        config.change_pin(pin_to_int(""), pin_to_int(msg.pin), None, None)
+        config.change_pin("", msg.pin, None, None)
 
     return Success(message="Device loaded")
 

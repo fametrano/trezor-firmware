@@ -87,7 +87,7 @@ class PinDialog(ui.Layout):
         prompt: str,
         subprompt: Optional[str],
         allow_cancel: bool = True,
-        maxlength: int = 9,
+        maxlength: Optional[int] = None,
     ) -> None:
         self.maxlength = maxlength
         self.input = PinInput(prompt, subprompt, "")
@@ -126,10 +126,10 @@ class PinDialog(ui.Layout):
             btn.dispatch(event, x, y)
 
     def assign(self, pin: str) -> None:
-        if len(pin) > self.maxlength:
+        if self.maxlength is not None and len(pin) > self.maxlength:
             return
         for btn in self.pin_buttons:
-            if len(pin) < self.maxlength:
+            if self.maxlength is None or len(pin) < self.maxlength:
                 btn.enable()
             else:
                 btn.disable()
