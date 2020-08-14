@@ -17,11 +17,13 @@
 import pytest
 
 from trezorlib import device, messages
+from trezorlib.client import MAX_PIN_LENGTH
 from trezorlib.exceptions import TrezorFailure
 
 PIN4 = "1234"
 PIN6 = "789456"
-
+PIN_MAX = "".join(chr((i % 9) + ord("1")) for i in range(MAX_PIN_LENGTH))
+PIN_TOO_LONG = "".join(chr((i % 9) + ord("1")) for i in range(MAX_PIN_LENGTH + 1))
 
 pytestmark = pytest.mark.skip_t2
 
@@ -49,7 +51,7 @@ def test_set_pin(client):
 
     # Let's set new PIN
     with client:
-        client.use_pin_sequence([PIN6, PIN6])
+        client.use_pin_sequence([PIN_MAX, PIN_MAX])
         client.set_expected_responses(
             [
                 messages.ButtonRequest(code=messages.ButtonRequestType.ProtectCall),
@@ -64,7 +66,7 @@ def test_set_pin(client):
     # Check that there's PIN protection now
     assert client.features.pin_protection is True
     # Check that the PIN is correct
-    _check_pin(client, PIN6)
+    _check_pin(client, PIN_MAX)
 
 
 @pytest.mark.setup_client(pin=PIN4)
@@ -75,7 +77,7 @@ def test_change_pin(client):
 
     # Let's change PIN
     with client:
-        client.use_pin_sequence([PIN4, PIN6, PIN6])
+        client.use_pin_sequence([PIN4, PIN_MAX, PIN_MAX])
         client.set_expected_responses(
             [
                 messages.ButtonRequest(code=messages.ButtonRequestType.ProtectCall),
@@ -91,7 +93,7 @@ def test_change_pin(client):
     # Check that there's still PIN protection now
     assert client.features.pin_protection is True
     # Check that the PIN is correct
-    _check_pin(client, PIN6)
+    _check_pin(client, PIN_MAX)
 
 
 @pytest.mark.setup_client(pin=PIN4)
@@ -126,7 +128,7 @@ def test_set_mismatch(client):
     # Let's set new PIN
     with pytest.raises(TrezorFailure, match="PIN mismatch"), client:
         # use different PINs for first and second attempt. This will fail.
-        client.use_pin_sequence([PIN4, PIN6])
+        client.use_pin_sequence([PIN4, PIN_MAX])
         client.set_expected_responses(
             [
                 messages.ButtonRequest(code=messages.ButtonRequestType.ProtectCall),
@@ -167,7 +169,7 @@ def test_change_mismatch(client):
     _check_pin(client, PIN4)
 
 
-@pytest.mark.parametrize("invalid_pin", ("1204", "", "1234567891"))
+@pytest.mark.parametrize("invalid_pin", ("1204", "", PIN_TOO_LONG))
 def test_set_invalid(client, invalid_pin):
     assert client.features.pin_protection is False
 
@@ -192,7 +194,7 @@ def test_set_invalid(client, invalid_pin):
     _check_no_pin(client)
 
 
-@pytest.mark.parametrize("invalid_pin", ("1204", "", "1234567891"))
+@pytest.mark.parametrize("invalid_pin", ("1204", "", PIN_TOO_LONG))
 @pytest.mark.setup_client(pin=PIN4)
 def test_enter_invalid(client, invalid_pin):
     assert client.features.pin_protection is True
