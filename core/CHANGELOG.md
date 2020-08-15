@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 - Print inverted question mark for non-printable characters.
 - Remove pre-fill bar from text rendering functions.  [#1173]
+- Allow spending coins from Bitcoin paths if the coin has implemented strong replay protection via `SIGHASH_FORKID`.  [#1188]
 
 ### Deprecated
 
@@ -264,3 +265,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 [#1139]: https://github.com/trezor/trezor-firmware/issues/1139
 [#1165]: https://github.com/trezor/trezor-firmware/pull/1165
 [#1173]: https://github.com/trezor/trezor-firmware/pull/1173
+[#1188]: https://github.com/trezor/trezor-firmware/issues/1188
